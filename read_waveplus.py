@@ -81,7 +81,7 @@ SamplePeriod = int(sys.argv[2])
 # ====================================
 
 def parseSerialNumber(ManuDataHexStr):
-    if (ManuDataHexStr == None or ManuDataHexStr == "None"):
+    if ManuDataHexStr is None or ManuDataHexStr == "None":
         SN = "Unknown"
     else:
         ManuData = bytearray.fromhex(ManuDataHexStr)
@@ -189,10 +189,7 @@ class Sensors():
             sys.exit(1)
    
     def conv2radon(self, radon_raw):
-        radon = "N/A" # Either invalid measurement, or not available
-        if 0 <= radon_raw <= 16383:
-            radon  = radon_raw
-        return radon
+        return radon_raw if 0 <= radon_raw <= 16383 else "N/A"
 
     def getValue(self, sensor_index):
         return self.sensor_data[sensor_index]

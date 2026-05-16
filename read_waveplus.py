@@ -22,223 +22,141 @@
 #
 # https://airthings.com
 
-# ===============================
-# Module import dependencies
-# ===============================
-
-from bluepy.btle import UUID, Peripheral, Scanner, DefaultDelegate
+import asyncio
+import struct
 import sys
 import time
-import struct
+
 import tableprint
+from bleak import BleakClient, BleakScanner
 
 # ===============================
 # Script guards for correct usage
 # ===============================
 
+USAGE = (
+    "USAGE: read_waveplus.py SN SAMPLE-PERIOD [pipe > yourfile.txt]\n"
+    "    SN: 10-digit serial number found under the magnetic backplate.\n"
+    "    SAMPLE-PERIOD: time in seconds between readings (must be > 0).\n"
+    "    pipe: optional, pipe output to a file."
+)
+
 if len(sys.argv) < 3:
-    print("ERROR: Missing input argument SN or SAMPLE-PERIOD.")
-    print("USAGE: read_waveplus.py SN SAMPLE-PERIOD [pipe > yourfile.txt]")
-    print("    where SN is the 10-digit serial number found under the magnetic backplate of your Wave Plus.")
-    print("    where SAMPLE-PERIOD is the time in seconds between reading the current values.")
-    print("    where [pipe > yourfile.txt] is optional and specifies that you want to pipe your results to yourfile.txt.")
-    sys.exit(1)
+    sys.exit(f"ERROR: Missing input argument SN or SAMPLE-PERIOD.\n{USAGE}")
 
 if not sys.argv[1].isdigit() or len(sys.argv[1]) != 10:
-    print("ERROR: Invalid SN format.")
-    print("USAGE: read_waveplus.py SN SAMPLE-PERIOD [pipe > yourfile.txt]")
-    print("    where SN is the 10-digit serial number found under the magnetic backplate of your Wave Plus.")
-    print("    where SAMPLE-PERIOD is the time in seconds between reading the current values.")
-    print("    where [pipe > yourfile.txt] is optional and specifies that you want to pipe your results to yourfile.txt.")
-    sys.exit(1)
+    sys.exit(f"ERROR: Invalid SN format.\n{USAGE}")
 
-if not sys.argv[2].isdigit() or int(sys.argv[2]) < 0:
-    print("ERROR: Invalid SAMPLE-PERIOD. Must be a numerical value larger than zero.")
-    print("USAGE: read_waveplus.py SN SAMPLE-PERIOD [pipe > yourfile.txt]")
-    print("    where SN is the 10-digit serial number found under the magnetic backplate of your Wave Plus.")
-    print("    where SAMPLE-PERIOD is the time in seconds between reading the current values.")
-    print("    where [pipe > yourfile.txt] is optional and specifies that you want to pipe your results to yourfile.txt.")
-    sys.exit(1)
+if not sys.argv[2].isdigit() or int(sys.argv[2]) <= 0:
+    sys.exit(f"ERROR: Invalid SAMPLE-PERIOD. Must be larger than zero.\n{USAGE}")
 
-if len(sys.argv) > 3:
-    Mode = sys.argv[3].lower()
-else:
-    Mode = 'terminal'  # (default) print to terminal
-
-if Mode != 'pipe' and Mode != 'terminal':
-    print("ERROR: Invalid piping method.")
-    print("USAGE: read_waveplus.py SN SAMPLE-PERIOD [pipe > yourfile.txt]")
-    print("    where SN is the 10-digit serial number found under the magnetic backplate of your Wave Plus.")
-    print("    where SAMPLE-PERIOD is the time in seconds between reading the current values.")
-    print("    where [pipe > yourfile.txt] is optional and specifies that you want to pipe your results to yourfile.txt.")
-    sys.exit(1)
+Mode = sys.argv[3].lower() if len(sys.argv) > 3 else "terminal"
+if Mode not in ("pipe", "terminal"):
+    sys.exit(f"ERROR: Invalid piping method.\n{USAGE}")
 
 SerialNumber = int(sys.argv[1])
 SamplePeriod = int(sys.argv[2])
 
-# ====================================
-# Utility functions for WavePlus class
-# ====================================
-
-def parseSerialNumber(ManuDataHexStr):
-    if (ManuDataHexStr == None or ManuDataHexStr == "None"):
-        SN = "Unknown"
-    else:
-        ManuData = bytearray.fromhex(ManuDataHexStr)
-
-        if (((ManuData[1] << 8) | ManuData[0]) == 0x0334):
-            SN = ManuData[2]
-            SN |= (ManuData[3] << 8)
-            SN |= (ManuData[4] << 16)
-            SN |= (ManuData[5] << 24)
-        else:
-            SN = "Unknown"
-    return SN
-
 # ===============================
-# Class WavePlus
+# Constants
 # ===============================
 
-class WavePlus():
-    def __init__(self, SerialNumber):
-        self.periph = None
-        self.curr_val_char = None
-        self.MacAddr = None
-        self.SN = SerialNumber
-        self.uuid = UUID("b42e2a68-ade7-11e4-89d3-123b93f75cba")
+CHARACTERISTIC_UUID = "b42e2a68-ade7-11e4-89d3-123b93f75cba"
+AIRTHINGS_MANUFACTURER_ID = 0x0334
 
-    def connect(self):
-        # Auto-discover device on first connection
-        if (self.MacAddr is None):
-            scanner = Scanner().withDelegate(DefaultDelegate())
-            searchCount = 0
-            while self.MacAddr is None and searchCount < 50:
-                devices = scanner.scan(0.1)  # 0.1 seconds scan period
-                searchCount += 1
-                for dev in devices:
-                    ManuData = dev.getValueText(255)
-                    SN = parseSerialNumber(ManuData)
-                    if (SN == self.SN):
-                        self.MacAddr = dev.addr  # exits the while loop on next conditional check
-                        break  # exit for loop
+SENSOR_NAMES = ["Humidity", "Radon ST avg", "Radon LT avg", "Temperature", "Pressure", "CO2 level", "VOC level"]
+SENSOR_UNITS = ["%rH", "Bq/m3", "Bq/m3", "degC", "hPa", "ppm", "ppb"]
 
-            if (self.MacAddr is None):
-                print("ERROR: Could not find device.")
-                print("GUIDE: (1) Please verify the serial number.")
-                print("       (2) Ensure that the device is advertising.")
-                print("       (3) Retry connection.")
-                sys.exit(1)
+# ===============================
+# Utility functions
+# ===============================
 
-        # Connect to device
-        if (self.periph is None):
-            self.periph = Peripheral(self.MacAddr)
-        if (self.curr_val_char is None):
-            self.curr_val_char = self.periph.getCharacteristics(uuid=self.uuid)[0]
 
-    def read(self):
-        if (self.curr_val_char is None):
-            print("ERROR: Devices are not connected.")
-            sys.exit(1)
-        rawdata = self.curr_val_char.read()
-        rawdata = struct.unpack('<BBBBHHHHHHHH', rawdata)
-        sensors = Sensors()
-        sensors.set(rawdata)
-        return sensors
+def parse_serial_number(manufacturer_data: dict) -> int | None:
+    """Extract serial number from BLE manufacturer data."""
+    data = manufacturer_data.get(AIRTHINGS_MANUFACTURER_ID)
+    if data is None:
+        return None
+    if len(data) >= 4:
+        return struct.unpack_from("<I", data, 0)[0]
+    return None
 
-    def disconnect(self):
-        if self.periph is not None:
-            self.periph.disconnect()
-            self.periph = None
-            self.curr_val_char = None
 
-# ===================================
-# Class Sensor and sensor definitions
-# ===================================
+def parse_sensor_data(raw: bytes) -> list[str] | None:
+    """Parse raw characteristic data into formatted sensor strings."""
+    values = struct.unpack("<BBBBHHHHHHHH", raw)
+    version = values[0]
+    if version != 1:
+        print("ERROR: Unknown sensor version. Contact Airthings for support.")
+        return None
 
-NUMBER_OF_SENSORS = 7
-SENSOR_IDX_HUMIDITY = 0
-SENSOR_IDX_RADON_SHORT_TERM_AVG = 1
-SENSOR_IDX_RADON_LONG_TERM_AVG = 2
-SENSOR_IDX_TEMPERATURE = 3
-SENSOR_IDX_REL_ATM_PRESSURE = 4
-SENSOR_IDX_CO2_LVL = 5
-SENSOR_IDX_VOC_LVL = 6
+    humidity = values[1] / 2.0
+    radon_st = values[4] if 0 <= values[4] <= 16383 else "N/A"
+    radon_lt = values[5] if 0 <= values[5] <= 16383 else "N/A"
+    temperature = values[6] / 100.0
+    pressure = values[7] / 50.0
+    co2 = values[8] * 1.0
+    voc = values[9] * 1.0
 
-class Sensors():
-    def __init__(self):
-        self.sensor_version = None
-        self.sensor_data = [None] * NUMBER_OF_SENSORS
-        self.sensor_units = ["%rH", "Bq/m3", "Bq/m3", "degC", "hPa", "ppm", "ppb"]
+    sensor_values = [humidity, radon_st, radon_lt, temperature, pressure, co2, voc]
+    return [f"{v} {u}" for v, u in zip(sensor_values, SENSOR_UNITS)]
 
-    def set(self, rawData):
-        self.sensor_version = rawData[0]
-        if (self.sensor_version == 1):
-            self.sensor_data[SENSOR_IDX_HUMIDITY] = rawData[1] / 2.0
-            self.sensor_data[SENSOR_IDX_RADON_SHORT_TERM_AVG] = self.conv2radon(rawData[4])
-            self.sensor_data[SENSOR_IDX_RADON_LONG_TERM_AVG] = self.conv2radon(rawData[5])
-            self.sensor_data[SENSOR_IDX_TEMPERATURE] = rawData[6] / 100.0
-            self.sensor_data[SENSOR_IDX_REL_ATM_PRESSURE] = rawData[7] / 50.0
-            self.sensor_data[SENSOR_IDX_CO2_LVL] = rawData[8] * 1.0
-            self.sensor_data[SENSOR_IDX_VOC_LVL] = rawData[9] * 1.0
-        else:
-            print("ERROR: Unknown sensor version.")
-            print("GUIDE: Contact Airthings for support.")
-            sys.exit(1)
 
-    def conv2radon(self, radon_raw):
-        radon = "N/A"  # Either invalid measurement, or not available
-        if 0 <= radon_raw <= 16383:
-            radon = radon_raw
-        return radon
+# ===============================
+# Main
+# ===============================
 
-    def getValue(self, sensor_index):
-        return self.sensor_data[sensor_index]
 
-    def getUnit(self, sensor_index):
-        return self.sensor_units[sensor_index]
+async def find_device():
+    """Scan for the Wave Plus with the matching serial number."""
+    print(f"Scanning for device with serial number {SerialNumber}...")
+    for _ in range(50):
+        devices = await BleakScanner.discover(timeout=2.0, return_adv=True)
+        for _, (dev, adv) in devices.items():
+            sn = parse_serial_number(adv.manufacturer_data)
+            if sn == SerialNumber:
+                return dev
+    return None
 
-try:
-    #---- Initialize ----#
-    waveplus = WavePlus(SerialNumber)
 
-    if (Mode == 'terminal'):
+async def main():
+    device = await find_device()
+    if device is None:
+        sys.exit(
+            "ERROR: Could not find device.\n"
+            "GUIDE: (1) Verify the serial number.\n"
+            "       (2) Ensure the device is advertising.\n"
+            "       (3) Retry connection."
+        )
+
+    if Mode == "terminal":
         print("\nPress ctrl+C to exit program\n")
-
     print(f"Device serial number: {SerialNumber}")
 
-    header = ['Humidity', 'Radon ST avg', 'Radon LT avg', 'Temperature', 'Pressure', 'CO2 level', 'VOC level']
-
-    if (Mode == 'terminal'):
-        print(tableprint.header(header, width=12))
-    elif (Mode == 'pipe'):
-        print(header)
+    if Mode == "terminal":
+        print(tableprint.header(SENSOR_NAMES, width=12))
+    else:
+        print(SENSOR_NAMES)
 
     while True:
-        waveplus.connect()
+        try:
+            async with BleakClient(device) as client:
+                raw = await client.read_gatt_char(CHARACTERISTIC_UUID)
+                data = parse_sensor_data(raw)
+                if data is None:
+                    sys.exit(1)
+                if Mode == "terminal":
+                    print(tableprint.row(data, width=12))
+                else:
+                    print(data)
+        except Exception as e:
+            print(f"WARNING: Connection error: {e}. Retrying...")
 
-        # read values
-        sensors = waveplus.read()
+        await asyncio.sleep(SamplePeriod)
 
-        # extract
-        humidity = f"{sensors.getValue(SENSOR_IDX_HUMIDITY)} {sensors.getUnit(SENSOR_IDX_HUMIDITY)}"
-        radon_st_avg = f"{sensors.getValue(SENSOR_IDX_RADON_SHORT_TERM_AVG)} {sensors.getUnit(SENSOR_IDX_RADON_SHORT_TERM_AVG)}"
-        radon_lt_avg = f"{sensors.getValue(SENSOR_IDX_RADON_LONG_TERM_AVG)} {sensors.getUnit(SENSOR_IDX_RADON_LONG_TERM_AVG)}"
-        temperature = f"{sensors.getValue(SENSOR_IDX_TEMPERATURE)} {sensors.getUnit(SENSOR_IDX_TEMPERATURE)}"
-        pressure = f"{sensors.getValue(SENSOR_IDX_REL_ATM_PRESSURE)} {sensors.getUnit(SENSOR_IDX_REL_ATM_PRESSURE)}"
-        CO2_lvl = f"{sensors.getValue(SENSOR_IDX_CO2_LVL)} {sensors.getUnit(SENSOR_IDX_CO2_LVL)}"
-        VOC_lvl = f"{sensors.getValue(SENSOR_IDX_VOC_LVL)} {sensors.getUnit(SENSOR_IDX_VOC_LVL)}"
 
-        # Print data
-        data = [humidity, radon_st_avg, radon_lt_avg, temperature, pressure, CO2_lvl, VOC_lvl]
-
-        if (Mode == 'terminal'):
-            print(tableprint.row(data, width=12))
-        elif (Mode == 'pipe'):
-            print(data)
-        
-        waveplus.disconnect()
-        
-        time.sleep(SamplePeriod)
-            
-finally:
-    waveplus.disconnect()
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nExiting.")

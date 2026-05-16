@@ -1,0 +1,9 @@
+[project]
+name = "waveplus-reader"
+version = "0.1.0"
+description = "Read sensor values from Airthings Wave Plus over BLE"
+requires-python = ">=3.9"
+dependencies = [
+    "bleak>=0.21.0",
+    "tableprint>=0.9.0",
+]
